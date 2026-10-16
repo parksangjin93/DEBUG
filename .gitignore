@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.claude/
+logs/*
+!logs/.gitkeep
+output/*
+!output/.gitkeep
+tc/*
+!tc/0827/
+tc/0827/*
+!tc/0827/scripts/
+*.xlsx
+*.zip
+*.log
+~$*
