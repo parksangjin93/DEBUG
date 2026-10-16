@@ -1,0 +1,12 @@
+TC_ID,TC_NAME,TEST_PURPOSE,STEP,TEST_METHOD,TYPE,VALUE,FAIL,TIMEOUT,MATCH,TAG,MODE,COOLDOWN
+DEMO001,job result,Synthetic log verdict demo,1,,CHECK,DEMO_JOB_BEGIN,,,CONTAINS,demo,,
+DEMO001,job result,Synthetic log verdict demo,2,,CHECK,DEMO_JOB_DONE id=(?P<id>\d+),DEMO_JOB_ERROR,5,REGEX,demo,,
+DEMO002,boot without repeat,Synthetic log verdict demo,1,,CHECK,DEMO_BOOT_BEGIN,,,CONTAINS,demo,,
+DEMO002,boot without repeat,Synthetic log verdict demo,2,,ABSENT,DEMO_BOOT_REPEAT,,30,CONTAINS,demo,,
+DEMO002,boot without repeat,Synthetic log verdict demo,3,,CHECK,DEMO_BOOT_READY,,60,CONTAINS,demo,,
+DEMO003,never triggered,Synthetic log verdict demo,1,,CHECK,DEMO_UNUSED_BEGIN,,,CONTAINS,demo,,
+DEMO003,never triggered,Synthetic log verdict demo,2,,CHECK,DEMO_UNUSED_DONE,,5,CONTAINS,demo,,
+DEMO004,unfinished at EOF,Synthetic log verdict demo,1,,CHECK,DEMO_PARTIAL_BEGIN,,,CONTAINS,demo,,
+DEMO004,unfinished at EOF,Synthetic log verdict demo,2,,CHECK,DEMO_PARTIAL_DONE,,100,CONTAINS,demo,,
+DEMO005,notice count,Synthetic log verdict demo,1,,CHECK,DEMO_NOTICE,,,CONTAINS,demo,EVENT,3
+DEMO006,draft rule,Synthetic log verdict demo,1,,CHECK,TODO_KEYWORD,,,CONTAINS,demo,,
