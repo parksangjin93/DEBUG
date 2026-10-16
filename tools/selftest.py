@@ -1,145 +1,99 @@
-"""
-분석기 자체 검증 (pytest 불필요).
+"""공개 가상 데이터로 로그 판정과 리포트 경로를 검증한다.
 
-    python tools/selftest.py
-
-가짜 로그를 리플레이해서 '나와야 할 판정'이 실제로 나오는지 확인한다.
-룰이나 엔진을 수정한 뒤 이걸 먼저 돌리면, 실제 장비 없이 회귀를 잡을 수 있다.
+저장소 루트에서 python tools/selftest.py 로 실행한다.
 """
 from __future__ import annotations
 
-import subprocess
+import json
 import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
 
+from openpyxl import load_workbook
+
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-from core.log_source import ReplaySource            # noqa: E402
-from core.rule_loader import RuleLoader, select     # noqa: E402
-from core.tc_manager import TCManager               # noqa: E402
+from core.profile import Profile
+from core.runner import Runner
 
-# (TC_ID, 기대 상태, 기대 횟수)
-EXPECTED = [
-    ("TC001", "PASS", 1),
-    ("TC001", "FAIL", 1),
-    ("TC001", "TIMEOUT", 1),
-    ("TC002", "PASS", 1),
-    ("TC003", "PASS", 1),
-    ("TC004", "PASS", 1),
-    ("TC005", "PASS", 1),
-    ("TC006", "INCOMPLETE", 1),   # TC004와 시작 트리거가 같아 잘못 시작됨 (룰 결함 감지)
-    ("TC026", "FAIL", 1),         # Redmine #9604 회귀
-]
+EXPECTED = Counter({
+    ("DEMO001", "PASS"): 1,
+    ("DEMO001", "FAIL"): 1,
+    ("DEMO001", "TIMEOUT"): 1,
+    ("DEMO002", "PASS"): 1,
+    ("DEMO002", "FAIL"): 1,
+    ("DEMO004", "INCOMPLETE"): 1,
+    ("DEMO005", "EVENT"): 1,
+})
 
 
-ABSENT_RULES = """TC_ID,TC_NAME,TEST_PURPOSE,STEP,TEST_METHOD,TYPE,VALUE,FAIL,TIMEOUT,MATCH,TAG
-TC900,Boot_No_Reboot,부팅 중 재부팅 없이 완료,1,부트로더 시작,CHECK,U-Boot 2019,,,CONTAINS,boot
-TC900,Boot_No_Reboot,부팅 중 재부팅 없이 완료,2,30초간 재부팅 미발생,ABSENT,U-Boot 2019,,30,CONTAINS,boot
-TC900,Boot_No_Reboot,부팅 중 재부팅 없이 완료,3,앱 부팅 완료,CHECK,BOOT COMPLETE,,60,CONTAINS,boot
-TC901,Todo_Sample,VALUE 미입력 예시,1,아직 안 채움,CHECK,TODO_STEP1,,,CONTAINS,todo
-"""
-
-ABSENT_CASES = [
-    ("정상(재부팅 없음)", [(0, "U-Boot 2019.04"), (2, "Starting kernel"),
-                     (20, "dvr: BOOT COMPLETE"), (45, "idle")], "PASS"),
-    ("부팅 중 재부팅", [(0, "U-Boot 2019.04"), (2, "Starting kernel"),
-                   (9, "U-Boot 2019.04"), (30, "dvr: BOOT COMPLETE")], "FAIL"),
-    ("부팅 미완료", [(0, "U-Boot 2019.04"), (2, "Starting kernel"),
-                 (90, "nothing"), (120, "idle")], "TIMEOUT"),
-]
-
-
-def run_absent() -> int:
-    """ABSENT(금지 문구 감시) 와 TODO(미입력) 동작 검증."""
-    from datetime import datetime, timedelta
-    tmp = Path(tempfile.gettempdir())
-    rules = tmp / "selftest_absent.csv"
-    rules.write_text(ABSENT_RULES, encoding="utf-8-sig")
-
-    defs_all, _ = RuleLoader(rules).load(), None
-    todo = [d for d in RuleLoader(rules).load() if d.is_todo]
-    fails = []
-    if len(todo) != 1:
-        fails.append(f"  TODO TC 감지 실패: 기대 1개, 실제 {len(todo)}개")
-
-    base = datetime(2026, 7, 22, 11, 0, 0)
-    for label, lines, expect in ABSENT_CASES:
-        log = tmp / "selftest_absent.log"
-        log.write_text("\n".join(
-            f"[{(base + timedelta(seconds=o)).strftime('%H:%M:%S.%f')[:-3]}] {t}"
-            for o, t in lines) + "\n", encoding="utf-8")
-
-        defs = [d for d in RuleLoader(rules).load() if not d.is_todo]
-        source = ReplaySource(log)
-        manager = TCManager(source.clock, console=None)
-        for d in defs:
-            manager.add(d)
-        got = []
-        manager.on_verdict = lambda v: got.append(v.status)
-        source.add_line_callback(manager.process)
-        source.add_tick_callback(manager.tick)
-        source.run()
-        manager.finalize()
-        if expect not in got:
-            fails.append(f"  ABSENT [{label}] 기대 {expect}, 실제 {got}")
-
-    if fails:
-        print(" ABSENT/TODO 검증 실패")
-        for f in fails:
-            print(f)
-        return 1
-    print(f" ABSENT/TODO 검증 통과 ({len(ABSENT_CASES)}개 시나리오 + TODO 감지)")
-    return 0
+def check(condition, message):
+    if not condition:
+        raise AssertionError(message)
 
 
 def run() -> int:
-    log_path = Path(tempfile.gettempdir()) / "[2026-07-22-10시46분32초].log"
-    gen = subprocess.run([sys.executable, str(BASE / "tools" / "make_test_log.py")],
-                         capture_output=True, text=True, check=True)
-    log_path.write_text(gen.stdout, encoding="utf-8")
+    # 실행마다 독립된 폴더를 사용해 이전 결과와 섞이지 않게 한다.
+    with tempfile.TemporaryDirectory(prefix="debug-selftest-") as tmp:
+        profile = Profile(name="DEMO", rules=[str(BASE / "examples/rules.csv")],
+                          all_tc=True, encoding="utf-8")
+        runner = Runner(profile, out_dir=tmp, quiet=True,
+                        replay=str(BASE / "examples/sample.txt"))
+        check([d.tc_id for d in runner.todo] == ["DEMO006"],
+              "TODO 규칙이 실행 대상에서 제외되지 않았습니다.")
+        check(not runner.warnings(), "가상 규칙 사이에 충돌이 있습니다.")
+        runner.run()
+        check(not runner.error, f"리플레이 오류: {runner.error}")
+        rows = [json.loads(line) for line in
+                runner.report.jsonl_path.read_text(encoding="utf-8").splitlines()]
+        actual = Counter((r["tc_id"], r["status"]) for r in rows)
+        check(actual == EXPECTED,
+              f"판정 불일치\n기대: {EXPECTED}\n실제: {actual}")
+        event = next(r for r in rows if r["status"] == "EVENT")
+        check(event["reason"] == "2회 검출", "이벤트 cooldown 집계 불일치")
+        passed = next(r for r in rows if r["tc_id"] == "DEMO001"
+                      and r["status"] == "PASS")
+        check("id=42" in passed["evidence"] and "\x1b" not in passed["evidence"],
+              "정규식 또는 ANSI 정제 결과가 리포트에 반영되지 않았습니다.")
+        absent_fail = next(r for r in rows if r["tc_id"] == "DEMO002"
+                           and r["status"] == "FAIL")
+        check("금지 문구" in absent_fail["reason"], "ABSENT 위반 사유 누락")
+        check(bool(absent_fail["evidence"]), "실패 근거 누락")
 
-    defs = RuleLoader(BASE / "tc" / "tc_rules.csv").load()
-    armed = select(defs, tc_filter=[f"TC{n:03d}" for n in list(range(1, 10)) + [26]])
+        workbook = load_workbook(runner.report.xlsx_path, read_only=True)
+        try:
+            check(workbook.sheetnames == ["Summary", "TC_Results"],
+                  "리포트 시트 구성 불일치")
+            report_rows = list(workbook["TC_Results"].iter_rows(min_row=2, values_only=True))
+            expected_report = EXPECTED + Counter({("DEMO003", "NOT_EXECUTED"): 1})
+            check(Counter((r[1], r[3]) for r in report_rows) == expected_report,
+                  "Excel 판정 또는 NOT_EXECUTED 집계 불일치")
+        finally:
+            workbook.close()
 
-    source = ReplaySource(log_path)
-    manager = TCManager(source.clock, console=None)
-    for d in armed:
-        manager.add(d)
+        # 부팅 완료 로그가 제한 시간 이후까지 오지 않는 별도 음성 사례.
+        missing = Path(tmp) / "missing.txt"
+        missing.write_text("[2026-01-01 09:00:00.000] DEMO_BOOT_BEGIN\n"
+                           "[2026-01-01 09:01:01.000] idle\n", encoding="utf-8")
+        timeout_profile = Profile(name="ABSENT_TIMEOUT", rules=profile.rules,
+                                  tc="DEMO002", encoding="utf-8")
+        timeout_runner = Runner(timeout_profile, out_dir=tmp, quiet=True,
+                                replay=str(missing))
+        timeout_runner.run()
+        check(not timeout_runner.error, f"TIMEOUT 사례 실행 오류: {timeout_runner.error}")
+        check([r["status"] for r in timeout_runner.report.results] == ["TIMEOUT"],
+              "ABSENT 뒤 CHECK의 TIMEOUT 판정 불일치")
 
-    got: list = []
-    manager.on_verdict = lambda v: got.append((v.tc_id, v.status))
-
-    source.add_line_callback(manager.process)
-    source.add_tick_callback(manager.tick)
-    source.run()
-    manager.finalize()
-
-    actual = Counter(got)
-    failures = []
-    for tc_id, status, count in EXPECTED:
-        if actual[(tc_id, status)] != count:
-            failures.append(
-                f"  기대 {tc_id} {status} x{count}  ->  실제 {actual[(tc_id, status)]}")
-
-    print("\n" + "=" * 60)
-    if failures:
-        print(" SELFTEST 실패")
-        print("=" * 60)
-        for f in failures:
-            print(f)
-        print("\n 실제 판정 전체:")
-        for (tc, st), n in sorted(actual.items()):
-            print(f"   {tc} {st} x{n}")
-        return 1
-    print(f" SELFTEST 통과 ({len(EXPECTED)}개 기대 판정 일치)")
-    print("=" * 60)
+    print("SELFTEST 통과: 가상 판정 7건, 이벤트 2회, TODO 제외, "
+          "NOT_EXECUTED 및 JSONL/Excel 검증, 부팅 TIMEOUT")
     return 0
 
 
 if __name__ == "__main__":
-    rc = run()
-    rc |= run_absent()
-    sys.exit(rc)
+    try:
+        sys.exit(run())
+    except AssertionError as exc:
+        print(f"SELFTEST 실패: {exc}", file=sys.stderr)
+        sys.exit(1)
